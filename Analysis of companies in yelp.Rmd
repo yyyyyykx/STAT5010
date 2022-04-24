@@ -1,0 +1,934 @@
+---
+title: "Analysis of businesses in Yelp"
+subtitle: Statistical Methods and Application Ⅱ - CU Boulder
+author: "Kexin Yu"
+date: "2022/3/20"
+output:
+  pdf_document:
+    number_sections: true
+    toc_depth: 2
+fontsize: 12pt
+geometry: margin=1in
+---
+
+\newpage  
+\tableofcontents  
+\newpage
+
+Introduction
+===============
+
+Yelp is a website that helps people to find appropriate business companies such as restaurant, home service, shopping, etc. This website benefits people's lives very much. There are much information about businesses in this website. And people can use this website to see the ratings and reviews from other people who have been in contacted with these companies. Therefore, they can choose the business they want. In this project, we'd like to do a analysis about the businesses, and plan to build a model that can predict accurately the ratings of businesses.
+
+\newpage 
+
+Import the data
+===============
+
+Load the packages
+---------------
+
+```{r warning=FALSE, message=FALSE}
+library(jsonlite)
+library(data.table)
+library(tidyverse)
+library(leaflet)
+library(RColorBrewer)
+library(wordcloud2)
+library(tidytext)
+library(textdata)
+library(randomForest)
+library(pROC)
+```
+
+Read the datasets
+---------------
+
+The first dataset is about the business data which includes location, attributes, categories, etc. This dataset we used for this project was found via Kaggle, or you can also find this dataset via Yelp. The site is https://www.kaggle.com/datasets/yelp-dataset/yelp-dataset/version/6?select=yelp_business.csv or https://www.yelp.com/dataset.
+
+```{r 1st dataset}
+#business_in <- stream_in(file("yelp_academic_dataset_business.json"))
+business_in <- fread("yelp_business.csv", header = TRUE)
+```
+
+The description for each variable in this business dataset can be found on Yelp, we just show the variables we need later.
+|Variable|Description|
+|:---|:---|
+|business_id|unique string business id|
+|name|the business's name|
+|city|the city|
+|state|state code|
+|latitude|latitude|
+|longitude|longitude|
+|stars|business's star, rounded to half-stars|
+|review_count|number of reviews|
+|is_open|0 or 1 for closed or open|
+|categories|business categories|
+
+The second dataset is about the full review text data including the user_id that wrote the review and the business_id the review is written for. This dataset we used for this project was found via Kaggle, or you can also find this dataset via Yelp. The site is https://www.kaggle.com/datasets/yelp-dataset/yelp-dataset/version/6?select=yelp_review.csv or https://www.yelp.com/dataset.
+
+```{r 2nd dataset, warning=FALSE, message=FALSE}
+review_in <- fread("yelp_review.csv", header = TRUE)
+```
+
+The description for each variable in this review dataset can be found on Yelp, we just show the variables we need later.
+|Variable|Description|
+|:---|:---|
+|user_id|unique string user id|
+|business_id|unique string business id, maps to business in yelp_business.csv|
+|stars|star rating|
+|text|the review itself|
+|useful|number of useful votes received|
+|funny|number of funny votes received|
+|cool|number of cool votes received|
+
+\newpage 
+
+Data preprocessing
+===============
+
+Business
+---------------
+
+```{r}
+business <- as_tibble(business_in)
+```
+
+Firstly, we try to see the first few rows of data, so that we can have a general understanding of this dataset.
+
+```{r}
+head(business)
+```
+
+Then, it's time to understand the data more detailed, such as the number of rows, the number of columns and data type in each column. We can see that there are 174567 objects and 13 variables in this business dataset.
+
+```{r}
+str(business)
+```
+
+Through looking at the information before, we can find that there are five columns that data types are number or integer, they are latitude, longitude, stars, review_count and is_open. So, we want to know whether there exist illogic? According to these results, we find no unreasonableness in the data, so we don't need to remove or modify data.
+
+```{r}
+temp <- business %>%
+  select(latitude, longitude, stars, review_count, is_open)
+summary(temp)
+```
+
+We also want to know if variables that data type is character have unreasonable place. According to this result, we find some strange things, many states' name are number not the letter, and some states' name are single letter.
+
+```{r}
+table(business$state)
+```
+
+Based on the finding, we decide to delete the objects whose state are number and single letter, because their not very much objects that states have problem.
+
+```{r}
+business <- business %>%
+  filter(state != "01" & state != "3" & state != "30" & state != "6" & state != "B" & state != "C")
+```
+
+Let's check if it exists NA in this dataset. 
+
+```{r}
+colSums(is.na(business))
+```
+
+According to the result before, there are only two columns that have NA, so we just need to remove the rows that have NA.
+
+```{r}
+business <- business %>%
+  filter(latitude != "NA" & longitude != "NA")
+```
+
+The last step is to remove the columns that we will not use in the analysis part and build the model part, we remove three columns: neighborhood, address and postal_code.
+
+```{r}
+business <- business %>%
+  select(-neighborhood, -address, -postal_code)
+```
+
+Because of a simple look about this dataset, we can find that there are "" in the names of businesses, we'd like to delete these signs.
+
+```{r}
+business$name <- gsub("\"\"", "", as.character(business$name))
+```
+
+Review
+---------------
+
+```{r}
+review <- as_tibble(review_in)
+```
+There are 5261668 objects and 9 columns in this review dataset, and the data types of all of variables are character.
+```{r}
+glimpse(review)
+```
+**We can also find that there are some variables that can convert its type from character into integer. So we do it. Therefore, this action will be beneficial to our data analysis and build the model.**
+```{r}
+#review$stars = as.numeric(review$stars)
+#review$useful = as.numeric(review$useful)
+#review$funny = as.numeric(review$funny)
+#review$cool = as.numeric(review$cool)
+```
+
+This step is to do some calculations about four variables that data type is integer.
+
+```{r}
+temp <- review %>%
+  select(stars, useful, funny, cool)
+summary(temp)
+```
+
+We found that there are two variables that minimum is less than 0 which is impossible. So we want to find these objects. This phenomenon occurs on the same object. 
+
+```{r}
+review[review$useful == "-1", ]
+```
+```{r}
+review[review$cool == "-1", ]
+```
+
+And we also want to see if there are variables that have missing value. 
+
+```{r}
+colSums(is.na(review))
+```
+
+There is no missing value in these variables, so we just need to delete the object that contains the unreasonable value.
+
+```{r}
+review <- review[-which(review$cool == "-1"),]
+```
+
+In the end, we also need to delete the variables useless in our later analysis and modeling.
+
+```{r}
+review <- review %>%
+  select(-review_id, -date) 
+```
+
+\newpage 
+
+Data analysis
+===============
+
+Business
+---------------
+
+### The number of businesses in each state and each city
+
+In this section, we'd like to calculate the number of businesses in each state and each city.   
+Firstly, we need to calculate the number of businesses in each state.
+
+```{r message = FALSE}
+business_state <- business %>%
+  group_by(state, stars) %>%
+  summarize(number = table(stars)) %>%
+  pivot_wider(names_from = "stars", values_from = "number")
+
+business_state$number <- rowSums(business_state[2:10], na.rm = TRUE)
+
+business_state <- business_state %>%
+  arrange(desc(number)) %>%
+  select(-number) %>%
+  pivot_longer(-state, names_to = "stars", values_to = "number")
+```
+
+It's time to have a whole look about the number of businesses in each state. After looking at this bar plot, we can find that there are many states that don't have business or have very few business. There are two reasons for this result, one is in this state people and businesses don't use this app, one is this dataset is incomplete. Whatever it is, we must know that the conclusion we made maybe not suitable for all of place in the U.S.
+
+```{r fig.width = 7, fig.height = 8, warning = FALSE}
+business_state %>%
+  ggplot(aes(x = state, y = number, fill = stars)) +
+  geom_bar(stat = "identity") + 
+  scale_y_continuous(limits = c(0, 55000), breaks = seq(0, 55000, 5000)) +
+  theme_bw() +
+  labs(title = "The number of businesses in each state") +
+  scale_fill_manual(values = brewer.pal(n = 9, "Blues")) + 
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+  panel.background = element_rect(fill = "#FAF5F4", color = "#12529B", size = 1.5),
+  panel.grid = element_blank(),
+  panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+  axis.title = element_text(color = "#12529B", face = "bold"),
+  axis.text = element_text(color = "#12529B", face = "bold"),
+  axis.ticks = element_line(color = "#12529B", size = 1),
+  legend.title = element_text(color = "#12529B", face = "bold"),
+  legend.text = element_text(color = "#12529B", face = "bold")) +
+  coord_flip()
+```
+
+Let's show the top 10 states that have the most businesses in bar plot, and we also split each bar by stars, so that we can not only find the relationship between the number of businesses and states, but also find the relationship between stars and top 10 states that have the most businesses.  
+
+After looking at this bar plot, we can find that although we have shown the number of businesses in top 10 states, there are big gaps among the number of businesses in each state. The number of businesses in AZ is over 50000, the number of businesses in NV is closing to 33000, and the number of businesses in ON is around 30000. But the number of businesses in other seven states are somewhere less than 15000.  
+
+And it's easier to see that in each state, there are very few businesses which the ratings are 1, 1.5, 2 or 2.5 stars, the proportion of 5 stars in each state varies widely. Almost the rating of 70% businesses is between 3 stars and 4.5 stars.
+
+```{r fig.width = 7, fig.height = 4, warning = FALSE}
+business_state <- business_state[1:90,]
+
+business_state %>%
+  ggplot(aes(x = state, y = number, fill = stars)) +
+  geom_bar(stat = "identity") + 
+  scale_y_continuous(limits = c(0, 55000), breaks = seq(0, 55000, 5000)) +
+  theme_bw() +
+  labs(title = "Top 10 states that have the most business") +
+  scale_fill_manual(values = brewer.pal(n = 9, "Blues")) + 
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+  panel.background = element_rect(fill = "#FAF5F4", color = "#12529B", size = 1.5),
+  panel.grid = element_blank(),
+  panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+  axis.title = element_text(color = "#12529B", face = "bold"),
+  axis.text = element_text(color = "#12529B", face = "bold"),
+  axis.ticks = element_line(color = "#12529B", size = 1),
+  legend.title = element_text(color = "#12529B", face = "bold"),
+  legend.text = element_text(color = "#12529B", face = "bold"))
+
+```
+
+Secondly, we need to calculate the number of businesses in each city.
+
+```{r}
+business_city <- business %>%
+  group_by(city, stars) %>%
+  summarize(number = table(stars)) %>%
+  pivot_wider(names_from = "stars", values_from = "number")
+
+business_city$number <- rowSums(business_city[2:10], na.rm = TRUE)
+
+business_city <- business_city %>%
+  arrange(desc(number)) %>%
+  select(-number) %>%
+  pivot_longer(-city, names_to = "stars", values_to = "number")
+```
+
+Let's show the top 10 cities that have the most businesses in bar plot, and we also split each bar by stars, so that we can also find the relationship between stars and top 10 cities that have the most businesses.
+In this bar plot, we can find that Las Vegas is the city that has the largest number of businesses, it has about 27000 businesses. And then, another two cities which has lots of businesses are Phoenix and Toronto, they have about 17000 businesses.  
+
+About the relationship between cities and stars, it looks like the same as we learn from the last plot, there are less 1, 1.5 stars businesses, and closing to 70% businesses are 3, 3.5, 4 or 4.5 stars. But the percentage of 5 stars in each city is not stable.
+
+```{r fig.width = 7, fig.height = 4, warning = FALSE}
+business_city <- business_city[1:90,]
+
+business_city %>%
+  ggplot(aes(x = city, y = number, fill = stars)) +
+  geom_bar(stat = "identity") + 
+  scale_y_continuous(limits = c(0, 27500), breaks = seq(0, 25000, 5000)) +
+  theme_bw() +
+  labs(title = "Top 10 cities that have the most business") +
+  scale_fill_manual(values = brewer.pal(n = 9, "Blues")) + 
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+  panel.background = element_rect(fill = "#FAF5F4", color = "#12529B", size = 1.5),
+  panel.grid = element_blank(),
+  panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+  axis.title = element_text(color = "#12529B", face = "bold"),
+  axis.text = element_text(color = "#12529B", face = "bold"),
+  axis.ticks = element_line(color = "#12529B", size = 1),
+  legend.title = element_text(color = "#12529B", face = "bold"),
+  legend.text = element_text(color = "#12529B", face = "bold")) + 
+  coord_flip()
+```
+
+We choose Phoenix as an example, and use leaflet to display all of businesses in this city on the map.
+
+```{r}
+Phoenix <- business %>%
+  filter(city == "Phoenix")
+
+center_lat <- median(Phoenix$latitude)
+center_lng <- median(Phoenix$longitude)
+
+leaflet(Phoenix) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addCircles(lng = ~longitude, lat = ~latitude, radius = ~stars, color = "#12529B") %>%
+  setView(lng = center_lng, lat = center_lat, zoom = 15)
+```
+
+### The quantity distribution of stars
+
+In this section, we'd want to know the quantity distribution of stars.  
+
+We have used a pie plot to show this quantity distribution. This plot can confirm what we said before, there are only 2.2% businesses are 1 stars, and 2.5% businesses are 1.5 stars, the number of these ratings is a very small percentage. And then we can find that businesses which get 3, 3.5, 4, 4.5 stars account for 65.1% of all businesses. 19.2% businesses are 4 stars, and this is the largest number of ratings.
+
+```{r fig.width = 5, fig.height = 5}
+business_stars <- business %>%
+  group_by(stars) %>%
+  summarize(number = table(stars))
+
+business_stars %>%
+  ggplot(aes(x = 'stars', y = number, fill = factor(stars))) + 
+  geom_bar(stat = 'identity', position = 'stack') + 
+  geom_text(stat = 'identity', 
+            aes(x = 1.6, label = paste(round(number/sum(number)*100, digit = 1), "%", sep = "")), 
+            position = position_stack(vjust = 0.5),
+            color = "#12529B", size = 3, fontface = "bold") + 
+  scale_y_continuous() + 
+  coord_polar(theta = 'y') +
+  theme_void() +
+  labs(title = '', x = '', y = '', fill = 'stars') + 
+  scale_fill_manual(values = brewer.pal(n = 9, "Blues")) + 
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.title = element_text(color = "#12529B", face = "bold"),
+        legend.text = element_text(color = "#12529B", face = "bold"))
+```
+
+### The quantity distribution of review_count
+
+In this section, we want to show the quantity distribution of the number of reviews.  
+
+We try to use density plot to show this quantity distribution.
+
+```{r  fig.width = 7, fig.height = 4}
+business %>%
+  ggplot(aes(x = review_count)) + 
+  geom_density(color = "#2973B5") + 
+  scale_x_continuous(limits = c(0, 7500), breaks = seq(0, 7000, 1000)) + 
+  theme_bw() +
+  labs(title = "The quantity distribution of the number of reviews") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1))
+```
+
+Through looking at this density plot, we can find that almost all of review count are in range [0, 100], which can also be proved by our calculation before (in data preprocessing, business). So, in order to have a better understanding of the quantity distribution of review_count, we choose to select the businesses that review_count is less than 100, and then show them in plot.  
+
+According to the ratings, we also split them into different groups. So we can also find the distribution in each star group.  
+
+In this density plot, the distribution of each groups look similar roughly, the trend of these cures are all increasing first and reach a peak, then decrease gradually. But we can find that different groups have different shapes in detailed, the distribution of businesses which get a 1 stars its slope is very steep. But the slope of other businesses are slower. The location of peak of each group is not same. For example, the peaks of 1, 1.5 and 5 stars businesses are a little more to the right.
+
+```{r fig.width = 7, fig.height = 8}
+business_review_count <- business %>%
+  select(stars, review_count) %>%
+  filter(review_count <= 100)
+
+business_review_count %>%
+  ggplot(aes(x = review_count)) + 
+  geom_density(color = "#2973B5") + 
+  facet_grid(factor(stars) ~ .) + 
+  scale_x_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) + 
+  theme_bw() +
+  labs(title = "The quantity distribution of the number of reviews") +
+  scale_fill_manual(values = brewer.pal(n = 9, "Blues")) + 
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1),
+        strip.background = element_rect(fill = "#E0ECF7", color = "#12529B", size = 1),
+        strip.text = element_text(color = "#12529B", face = "bold"))
+```
+
+### The most popular catergories 
+
+In this section, we'd like to find which categories are more popular in these businesses.  
+
+Firstly, because of many content in one categories column, we need to separate them, and calculate the number of each content.
+
+```{r}
+business_categories <- str_split(business$categories, pattern = ";")
+business_categories <- as.data.frame(unlist(business_categories))
+colnames(business_categories) <- c("categories")
+
+business_categories <- business_categories %>%
+  group_by(categories) %>%
+  summarize(number = table(categories)) %>%
+  arrange(desc(number))
+
+business_categories <- business_categories[1:10,]
+```
+Then, let's use bar plot to show the top 10 popular categories among these businesses.  
+
+We can see that there are 54585 businesses mark as restaurants, and these businesses are accounting for 27.3%. And then, shopping and food are also popular categories. Of course, food related businesses are not the only company type on Yelp, beauty&spas, home service, health&medical are also very popular, which means this is a very convenient app for people to use, because of its broad range cover.
+
+```{r fig.width = 7, fig.height = 4}
+label <- paste(round(business_categories$number/sum(business_categories$number)*100, 1), "%", sep = "")
+
+business_categories %>%
+  mutate(categories = fct_reorder(categories, number)) %>%
+  ggplot(aes(x = categories, y = number)) +
+  geom_bar(stat = "identity", fill = "#2973B5") + 
+  geom_text(aes(y = 1000, label = paste(number, label, sep = "  "),
+                hjust = 0, vjust = 0.5 ),
+            color = "#F7FBFF", size = 3.5) + 
+  scale_y_continuous(limits = c(0, 55000), breaks = seq(0, 55000, 10000)) +
+  theme_bw() +
+  labs(title = "Top 10 popular categories") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1)) + 
+  coord_flip()
+```
+
+Review
+---------------
+
+### The user reviews most
+
+In this section, we want to know the user that reviews most.  
+
+Firstly, we need to count the number of reviews each user write, and then choose the top 10 users that review most.
+
+```{r}
+review_user <- review %>%
+  select(user_id) %>%
+  group_by(user_id) %>%
+  summarize(number = n()) %>%
+  arrange(desc(number))
+
+review_user <- review_user[1:10,]
+```
+
+Then we decide to use bar plot to show the number of users' reviews. We find that the user whose id is CxDOIDnH8gp9KXzpBHJYXw reviews most, there are 3569 review 22.7% of these 10 users' reviews. Except this user, user whose id is bLbSNkLggFnqwNNzzq-Ijw also write many reviews, there are 2077 reviews. And the number of reviews of others that the number of reviews also in top 10 are all less than 1500.
+
+```{r}
+label <- paste(round(review_user$number/sum(review_user$number)*100, 1), "%", sep = "")
+
+review_user %>%
+  mutate(user_id = fct_reorder(user_id, number)) %>%
+  ggplot(aes(x = user_id, y = number)) +
+  geom_bar(stat = "identity", fill = "#2973B5") + 
+  geom_text(aes(y = 100, label = paste(number, label, sep = "  "),
+                hjust = 0, vjust = 0.5 ),
+            color = "#F7FBFF", size = 3.5) + 
+  scale_y_continuous(limits = c(0, 4000), breaks = seq(0, 4000, 1000)) +
+  theme_bw() +
+  labs(title = "Top 10 users review most") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1)) + 
+  coord_flip()
+```
+
+### The business received the most reviews 
+
+In this section, we want to find the business that received the most reviews.  
+
+Firstly, we need to count the number of reviews each business received, and then choose the top 10 businesses that received the most reviews.
+
+```{r}
+review_business <- review %>%
+  select(business_id) %>%
+  group_by(business_id) %>%
+  summarize(number = n()) %>%
+  arrange(desc(number))
+
+review_business <- review_business[1:10,]
+```
+
+Then, because it's not easy for us to use business id to do the analysis, so we can merge this review_business dataframe which contains the business_id and number and the business dataframe. Therefore, we can use the name not the id of business.
+
+```{r}
+review_merge <- merge(x = review_business, y = business, by = "business_id", all = FALSE)
+
+review_merge <- review_merge %>%
+  select(name, number)
+```
+
+It's the time to use the bar plot to show the top 10 businesses that received the most reviews. According to this plot, we can find that top 2 businesses Mon Ami Gabi and Bacchanal Buffet received over 7000 reviews. It;s a big number.
+
+```{r}
+label <- paste(round(review_merge$number/sum(review_merge$number)*100, 1), "%", sep = "")
+
+review_merge %>%
+  mutate(name = fct_reorder(name, number)) %>%
+  ggplot(aes(x = name, y = number)) +
+  geom_bar(stat = "identity", fill = "#2973B5") + 
+  geom_text(aes(y = 100, label = paste(number, label, sep = "  "),
+                hjust = 0, vjust = 0.5 ),
+            color = "#F7FBFF", size = 3.5) + 
+  scale_y_continuous(limits = c(0, 7500), breaks = seq(0, 8000, 1000)) +
+  theme_bw() +
+  labs(title = "Top 10 business received the most reviews") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1)) + 
+  coord_flip()
+```
+
+### The quantity distribution of stars
+
+In this section, we want to find the quantity distribution of stars. The first thing we want to emphasize is that this quation is not the same as the question we met in the business part. In the business part, the value of stars has 9 possible choices, and this value is coming from the stars given by all of customers. In this receive part, the value of stars only has 5 possible choices, and this value is given by only 1 customer.  
+We need to count the number of reviews each business received, and then choose the top 10 businesses that received the most reviews.
+
+```{r}
+review_stars <- review %>%
+  select(stars) %>%
+  group_by(stars) %>%
+  summarize(number = n())
+```
+
+Then we choose the pie plot to show the quantity distribution of stars. The number of 5 stars that people gave is most, 5 star accounted for 42.8%. And then 4 star and 1 star are two ratings that people gave frequently.
+
+```{r}
+review_stars %>%
+  ggplot(aes(x = 'stars', y = number, fill = factor(stars))) + 
+  geom_bar(stat = 'identity', position = 'stack') + 
+  geom_text(stat = 'identity', 
+            aes(x = 1.6, label = paste(round(number/sum(number)*100, digit = 1), "%", sep = "")), 
+            position = position_stack(vjust = 0.5),
+            color = "#12529B", size = 3, fontface = "bold") + 
+  scale_y_continuous() + 
+  coord_polar(theta = 'y') +
+  theme_void() +
+  labs(title = '', x = '', y = '', fill = 'stars') + 
+  scale_fill_manual(values = brewer.pal(n = 9, "Blues")[4:8]) + 
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.title = element_text(color = "#12529B", face = "bold"),
+        legend.text = element_text(color = "#12529B", face = "bold"))
+```
+
+### text
+
+#### Word cloud of Mon Ami Gabi
+
+In this part, we plan to create a word cloud for business which name is Mon Ami Gabi, this is the business that received the most reviews.  
+
+Firstly, we need to extract the text about Mon Ami Gabi from the review dataset.
+
+```{r}
+review_MAG <- review %>%
+  filter(business_id == "4JNXUYY8wbaaDmk3BPzlWw") %>%
+  select(text)
+```
+
+We need to do split column into tokens, and then remove stop words and numbers. Calculating the occurrences of each word. 
+
+```{r}
+review_MAG <- review_MAG %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  filter(!(str_detect(word, "\\d"))) %>%
+  group_by(word) %>%
+  summarize(number = n())
+```
+
+Let's build a word cloud about the text of Mon Ami Gabi.
+
+```{r}
+wordcloud2(data = review_MAG, color = 'random-light')
+```
+
+#### Top 10 words of Mon Ami Gabi
+
+In this part, we'd like to show the top 10 words that users always use to describe the Mon Ami Gabi.  
+
+Firstly, we need to store this top 10 words.
+
+```{r}
+review_MAG <- review_MAG %>%
+  arrange(desc(number))
+
+review_MAG_top10 <- review_MAG[1:10,]
+```
+
+Then, let's use bar plot to show the result. In this plot, we can know that Mon Ami Gabi is a restaurant, because of its words. Food is the word appear most, and delicious also appears in this top 10 words, so maybe this restaurant has a good taste and it is okay for people to eat.
+
+```{r fig.width = 7, fig.height = 4}
+label <- paste(round(review_MAG_top10$number/sum(review_MAG_top10$number)*100, 1), "%", sep = "")
+
+review_MAG_top10 %>%
+  mutate(word = fct_reorder(word, number)) %>%
+  ggplot(aes(x = word, y = number)) +
+  geom_bar(stat = "identity", fill = "#2973B5") + 
+  geom_text(aes(y = 100, label = paste(number, label, sep = "  "),
+                hjust = 0, vjust = 0.5 ),
+            color = "#F7FBFF", size = 3.5) + 
+  scale_y_continuous(limits = c(0, 5500), breaks = seq(0, 6000, 1000)) +
+  theme_bw() +
+  labs(title = "Top 10 business received the most reviews") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1)) + 
+  coord_flip()
+```
+
+#### Sentiment analysis
+
+In this part, we want to do a sentiment analysis of the top 10 businesses received the most reviews.  
+
+Firstly, we need to import the dictionary we want use, bing is the dictionary that be chosen.
+
+```{r}
+bing <- get_sentiments("bing")
+```
+
+Select the top 10 businesses.
+
+```{r}
+review_text_top10 <- review %>%
+  filter(.,business_id %in% c("4JNXUYY8wbaaDmk3BPzlWw","RESDUcs7fIiihp38-d6_6g","K7lWdNUhCbcnEvI0NhGewg",
+                              "cYwJA2A6I12KNkm2rtXd5g","DkYS3arLOhA8si5uUEmHOw","f4x1YBxkLrZg652xt2KR5g",
+                              "2weQS-RnoOBhb1KsHKyoSQ","KskYqH1Bi7Z_61pH6Om8pg","eoHdUeQDNgQ6WYEnP2aiRw",
+                              "ujHiaprwCQ5ewziu0Vi9rw")) %>%
+  select(business_id, text)
+```
+
+Split column into tokens, and then remove stop words and numbers.
+
+```{r}
+review_text_top10 <- review_text_top10 %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  filter(!(str_detect(word, "\\d")))
+```
+
+Use the bing dictionary to give the word in users' review a sentiment. Of course, we can only give the words which are included in the bing dictionary a positive or negative sentiment.
+
+```{r}
+review_text_bing <- review_text_top10 %>%
+  inner_join(bing, by = "word")
+```
+
+In the end, we calculate the number of positive words and negative words for each business.
+
+```{r}
+review_text_bing <- review_text_bing %>%
+  group_by(business_id, sentiment) %>%
+  summarize(number = n())
+```
+
+Because it's a little bit difficult for us to connect the business and its id, so we merge two dataframe, and we can see the names of businesses not the ids of businesses.
+
+```{r}
+review_text_bing <- merge(x = review_text_bing, y = business, by = "business_id", all = FALSE)
+
+review_text_bing <- review_text_bing %>%
+  select(name, sentiment, number)
+```
+
+Let's use the bar plot to have a more intuitive understanding of the sentiment of users for these top 10 businesses. According to this plot, it's easy to find the relationship between the number of negative words and the number of positive words. Mon Ami Gabi is the business that obtained the highest proportion of positive words in this 10 businesses. Although Serendipity 3 and Hash House A Go Go are the two businesses that acquired the lowest porprotion of positive words, the proportions of positive words are still more than 50%.
+
+```{r fig.width = 7, fig.height = 4}
+review_text_bing %>%
+  ggplot(aes(x = name, y = number, fill = sentiment)) +
+  geom_bar(stat = "identity", position = "fill") + 
+  theme_bw() +
+  labs(title = "Sentiment analysis of the top 10 businesses") +
+  scale_fill_manual(values = brewer.pal(n = 9, "Blues")[5:6]) +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1),
+        legend.title = element_text(color = "#12529B", face = "bold"),
+        legend.text = element_text(color = "#12529B", face = "bold")) + 
+  coord_flip()
+```
+
+### useful, funny and cool
+
+In this part, we decide to show people the quantity distribution of the number of useful, funny and cool offered by users.  
+
+According to the simple statistical understanding of the data(Data preprocess, Review), we find that the number of useful, funny and cool is very less. So box plot was used to show these quantity distributions.
+
+#### The quantity distribution of the number of useful offered by users
+
+Most of the number of useful are less than 1000, only a few between 1000 and 2000. And useful of one review is more than 3000, useful of another one review is a little more than 2000.
+
+```{r fig.width = 7, fig.height = 4}
+review_useful <- review %>%
+  select(useful)
+
+review_useful %>%
+  ggplot(aes(y = useful)) + 
+  geom_boxplot() + 
+  theme_bw() +
+  labs(title = "The number of useful offered by users") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1))
+```
+
+#### The quantity distribution of the number of funny offered by users
+
+Most of the number of funny are less than 1000, only one review that its funny received close to 1500.
+
+```{r fig.width = 7, fig.height = 4}
+review_funny <- review %>%
+  select(funny)
+
+review_funny %>%
+  ggplot(aes(y = funny)) + 
+  geom_boxplot() + 
+  theme_bw() +
+  labs(title = "The number of funny offered by users") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1))
+```
+
+#### The quantity distribution of the number of cool offered by users
+
+Most of the number of cool are less than 300, only two reviews that their funny received more than 300. One of these two received a little more than 300 cool, and the other one received close to 1200 cool.
+
+```{r fig.width = 7, fig.height = 4}
+review_cool <- review %>%
+  select(cool)
+
+review_cool %>%
+  ggplot(aes(y = cool)) + 
+  geom_boxplot() + 
+  theme_bw() +
+  labs(title = "The number of cool offered by users") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#12529B", face = "bold"),
+        panel.background = element_rect(fill = "#F7FBFF", color = "#12529B", size = 1.5),
+        panel.grid = element_blank(),
+        panel.grid.major = element_line(color = "#E0ECF7", size = 1),
+        axis.title = element_text(color = "#12529B", face = "bold"),
+        axis.text = element_text(color = "#12529B", face = "bold"),
+        axis.ticks = element_line(color = "#12529B", size = 1))
+```
+
+\newpage 
+
+Build the model
+===============
+
+In this section, we plan to use some algorithms to build models, and then compare these models, find the best model. These models are used for predicting the business rate.  
+
+Random Forest
+---------------
+
+Firstly, we need to select the variables we will use to build the model from the business dataset. And if we want to use random forest classification, we need to convert the type of stars from numeric to factor.
+
+```{r}
+business_model <- business %>%
+  select(-business_id, -name, -categories)
+
+business_model$stars <- as.factor(business_model$stars)
+```
+
+The proportion of training set and testing set is 7:3.
+
+```{r}
+set.seed(0)
+index <- sample(2, nrow(business_model), replace = TRUE, prob = c(0.7,0.3))
+train <- business_model[index == 1, ]
+test <- business_model[index == 2, ]
+```
+
+Now, we have already done all of necessary things before we modeling, so it's time to train this prediction model. We don't change any default parameter value in the beginning.
+
+```{r}
+set.seed(0)
+stars_randomForest <- randomForest(stars ~ ., data = train)
+```
+
+Is it true that the more decision trees, the better accuracy our model is? We can use a plot to show the relationship between the number of decision trees and the error rate.  
+
+According to this plot, we can find that when the number of decision tree is more than 100, the error rate looks like stable. Because the larger number of decision trees, the more run time, so we'd like to consider 100 as the number of decision trees in the model.
+
+```{r}
+plot(stars_randomForest)
+```
+
+Then, we want to find the best mtry which lead our model to be more accurate.  
+
+According to this result, we find that the best mtry is 2.
+
+```{r}
+set.seed(0)
+n <- length(names(train))
+min <- 100
+num <- 0
+for (i in 1:(n-1)) {
+  mtry_fit <- randomForest(stars ~ ., data = train, ntree = 100)
+  err <- mean(mtry_fit$err.rate)
+  print(err)
+  if(err < min) {    
+    min = err     
+    num = i 
+  }
+}
+print(min)
+print(num)
+```
+
+After we decide the number of decision trees and mtry in our model, we train the model again.
+
+```{r}
+set.seed(0)
+stars_randomForest <- randomForest(stars ~ ., data = train, ntree = 100, mtry = 2)
+```
+
+Let's look at the specifics of this model. We can see the accuracy from the down here. The error rate of our model is 74.32%, it's too high. From the confusion matrix, for business that obtained one star, only one business is one star in our prediction. Although it's a little bit difficult to have a exact prediction, because of 9 ratings, our model need some improvements.
+
+```{r}
+stars_randomForest
+```
+
+And through looking at this plot, we can find the importance of each variable. Longitude, latitude and review_count are the top 3 variables that more important in this model.
+
+```{r fig.width = 7, fig.height = 4}
+varImpPlot(stars_randomForest, main = "Variable importance")
+```
+
+Then, we need to use this model to predict ratings of businesses. The table below can show us the result of prediction.
+
+```{r}
+stars_pred <- predict(stars_randomForest, newdata = test)
+table(stars_pred, test$stars)
+```
+
+We use AUC to do a evaluation about our model. The result is 0.5435. According to the definition, we can know that the larger the number of AUC, the better the model. So our model is not good.
+
+```{r warning=FALSE, message=FALSE}
+roc <- multiclass.roc(as.ordered(test$stars), as.ordered(stars_pred))
+roc
+```
+
+Linear Regression
+---------------
+
+If we want to build linear regression model, we need to transform the categorical variable with n level into n-1 variables with two levels. Because both city and state have very much variables, and it's difficult for us to convert. So, we don't not build a linear regression model.
+
+\newpage 
+
+Improvements
+===============
+
+This project has some parts that can be improved in the future.
+
+Big Data
+---------------
+
+The dataset of review is too big to be loaded in by using stream_in. So, we decide to use the csv version not the json version of this review dataset, but the data is not latest. And if we use the old version, we also need to modify the business dataset version. There are some differences between the old version and latest version of this business dataset, for example, the latest version of business dataset contains a variable named attributes which includes many attributes of business, and these attributes may have great effect on the prediction of ratings.
+
+Natural Language Processing
+---------------
+
+When we tried to create the word cloud of businesses, we need to use NLP. And in this project, we only do some simple process, such as delete the stop words and numbers. There are some other words need to be changed, for example, there are some words are same meaning but different properties, maybe it's better to merge together.
